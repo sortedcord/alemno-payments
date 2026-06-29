@@ -2,8 +2,14 @@ import io
 import pytest
 from httpx import AsyncClient
 from app.worker import celery_app
+
+# Mark all tests as async
 pytestmark = pytest.mark.asyncio
+
+# Set celery to run tasks eagerly (synchronously) during API testing
 celery_app.conf.task_always_eager = True
+
+
 async def test_upload_csv_success(client: AsyncClient):
     csv_content = (
         "transaction_id,date,amount,category,description\n"
@@ -18,6 +24,8 @@ async def test_upload_csv_success(client: AsyncClient):
             "text/csv",
         )
     }
+
+    # 1. Post upload CSV
     response = await client.post("/api/v1/jobs/upload", files=files)
     assert response.status_code == 201
 
@@ -25,7 +33,11 @@ async def test_upload_csv_success(client: AsyncClient):
     assert "id" in data
     assert data["filename"] == "transactions.csv"
     assert data["status"] == "pending"  # Initial state returned by router immediately
+
     job_id = data["id"]
+
+    # Since Celery is in eager mode, the task should have completed immediately.
+    # 2. Get Job Status
     status_response = await client.get(f"/api/v1/jobs/{job_id}/status")
     assert status_response.status_code == 200
     status_data = status_response.json()
@@ -35,6 +47,8 @@ async def test_upload_csv_success(client: AsyncClient):
     assert status_data["summary"]["total_amount"] == 15120.50
     assert status_data["summary"]["anomalies_count"] == 1
     assert status_data["summary"]["top_category"] == "Electronics"
+
+    # 3. Get Job Results
     results_response = await client.get(f"/api/v1/jobs/{job_id}/results")
     assert results_response.status_code == 200
     results_data = results_response.json()
@@ -47,7 +61,10 @@ async def test_upload_csv_success(client: AsyncClient):
     assert results["flagged_anomalies"][0]["transaction_id"] == "TX1002"
     assert results["spend_breakdown"]["Groceries"]["total_spend"] == 120.50
     assert "Successfully parsed and processed" in results["narrative_summary"]
+
+
 async def test_upload_invalid_csv(client: AsyncClient):
+    # Invalid CSV structure (missing required column)
     csv_content = (
         "transaction_id,amount,category,description\n"
         "TX1001,120.50,Groceries,Weekly grocery shop\n"
