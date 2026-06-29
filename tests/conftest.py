@@ -10,7 +10,9 @@ from app.db.base import Base
 from app.main import app
 
 # Use a test database suffix or a separate database for testing
-TEST_DATABASE_URL = settings.DATABASE_URL.replace(settings.POSTGRES_DB, f"test_{settings.POSTGRES_DB}")
+TEST_DATABASE_URL = settings.DATABASE_URL.replace(
+    settings.POSTGRES_DB, f"test_{settings.POSTGRES_DB}"
+)
 
 # Create async engine for test db
 test_engine = create_async_engine(
@@ -33,7 +35,6 @@ _db_offline = False
 def initialize_test_db():
     """Create test tables and clean them up after all tests finish."""
     global _db_offline
-    import asyncio
     try:
         loop = asyncio.get_event_loop_policy().get_event_loop()
     except RuntimeError:
@@ -85,16 +86,17 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 @pytest.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     """Provide an HTTPX AsyncClient for FastAPI endpoint testing with db overrides."""
+
     # Override get_db dependency to use the test session
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
-    
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
         yield client
-        
+
     app.dependency_overrides.clear()
