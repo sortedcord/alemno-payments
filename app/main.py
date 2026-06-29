@@ -19,3 +19,14 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     lifespan=lifespan,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(jobs_router, prefix=settings.API_V1_STR)
+@app.get("/health", tags=["health"])
+def health_check():
+    return {"status": "ok", "project": settings.PROJECT_NAME}
