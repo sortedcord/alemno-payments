@@ -9,16 +9,21 @@ from app.db.session import engine
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup: Create tables if they don't exist
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
     # Shutdown: Clean up pool
     await engine.dispose()
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     lifespan=lifespan,
 )
+
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,7 +31,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include API Router
 app.include_router(jobs_router, prefix=settings.API_V1_STR)
+
+
+# Root healthcheck endpoint
 @app.get("/health", tags=["health"])
 def health_check():
     return {"status": "ok", "project": settings.PROJECT_NAME}

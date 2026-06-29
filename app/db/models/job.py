@@ -33,6 +33,7 @@ class Job(Base):
         onupdate=func.now(),
         nullable=False,
     )
+    # JSON summaries and results
     summary: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSON,
         nullable=True,

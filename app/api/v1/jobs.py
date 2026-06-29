@@ -13,6 +13,10 @@ async def upload_csv(
     file: UploadFile = File(...),
     service: JobService = Depends(get_job_service),
 ):
+    """
+    Accepts a CSV file upload. Validates it, creates a job record in the database
+    with status=pending, enqueues the processing task, and returns the job_id immediately.
+    """
     if not file.filename.endswith(".csv"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -35,6 +39,10 @@ async def get_job_status(
     job_id: str,
     service: JobService = Depends(get_job_service),
 ):
+    """
+    Returns the current status of the job: pending, processing, completed, or failed.
+    If completed, also includes a summary field with high-level stats.
+    """
     try:
         job = await service.get_job_status(job_id)
         return job
@@ -50,6 +58,10 @@ async def get_job_result(
     job_id: str,
     service: JobService = Depends(get_job_service),
 ):
+    """
+    Returns the full structured output: cleaned transactions list, flagged anomalies,
+    per-category spend breakdown, and the LLM-generated narrative summary.
+    """
     try:
         job = await service.get_job_results(job_id)
         return job
@@ -65,4 +77,8 @@ async def get_all_jobs(
     status: Optional[str] = Query(None, description="Filter jobs by status"),
     service: JobService = Depends(get_job_service),
 ):
+    """
+    Lists all jobs with their status, filename, row count, and created_at timestamp.
+    Supports filtering via ?status= query parameter.
+    """
     return await service.list_jobs(status=status)
