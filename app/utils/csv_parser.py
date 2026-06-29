@@ -8,11 +8,15 @@ REQUIRED_COLUMNS = {"transaction_id", "date", "amount", "category", "description
 
 
 def parse_and_validate_csv(content: bytes) -> List[Dict[str, Any]]:
+    try:
+        decoded = content.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise InvalidCSVException("CSV file must be UTF-8 encoded text") from e
+
     csv_file = io.StringIO(decoded)
     reader = csv.DictReader(csv_file)
 
     # Map headers to predefined required cols
-    headers = {h.strip().lower() for h in reader.fieldnames if h}
     header_mapping = {}
     for actual_header in reader.fieldnames:
         cleaned = actual_header.strip().lower()
@@ -34,12 +38,16 @@ def parse_and_validate_csv(content: bytes) -> List[Dict[str, Any]]:
         description = row.get(header_mapping["description"])
 
         if not all([t_id, date_str, amount_str, category, description]):
-            raise InvalidCSVException(f"Row {line_num}: Empty values are not allowed in required fields")
+            raise InvalidCSVException(
+                f"Row {line_num}: Empty values are not allowed in required fields"
+            )
 
         try:
             amount = float(amount_str.strip())
         except ValueError as e:
-            raise InvalidCSVException(f"Row {line_num}: Invalid amount '{amount_str}'. Must be a number.") from e
+            raise InvalidCSVException(
+                f"Row {line_num}: Invalid amount '{amount_str}'. Must be a number."
+            ) from e
 
         parsed_date = None
         for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"):
