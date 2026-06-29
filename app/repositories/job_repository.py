@@ -14,6 +14,10 @@ class JobRepository:
         await self.db.flush()
         return job
 
+    async def get_by_id(self, job_id: str) -> Optional[Job]:
+        query = select(Job).where(Job.id == job_id)
+        result = await self.db.execute(query)
+        return result.scalar_one_or_none()
 
     async def list_all(self, status: Optional[str] = None) -> List[Job]:
         query = select(Job)
@@ -23,3 +27,9 @@ class JobRepository:
         result = await self.db.execute(query)
         return list(result.scalars().all())
 
+    async def update(self, job: Job, **kwargs) -> Job:
+        for key, value in kwargs.items():
+            if hasattr(job, key):
+                setattr(job, key, value)
+        await self.db.flush()
+        return job
