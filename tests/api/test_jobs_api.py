@@ -12,9 +12,9 @@ celery_app.conf.task_always_eager = True
 
 async def test_upload_csv_success(client: AsyncClient):
     csv_content = (
-        "transaction_id,date,amount,category,description\n"
-        "TX1001,2026-06-25,120.50,Groceries,Weekly grocery shop\n"
-        "TX1002,06/26/2026,15000.00,Electronics,New Laptop\n"  # This will be flagged as anomaly (> $5,000)
+        "txn_id,date,amount,merchant,currency,category,account\n"
+        "TX1001,2026-06-25,120.50,Weekly grocery shop,INR,Groceries,ACC01\n"
+        "TX1002,06/26/2026,6000.00,New Laptop,USD,Electronics,ACC02\n"  # Anomaly (> $5,000 USD equivalent)
     )
 
     files = {
@@ -43,10 +43,15 @@ async def test_upload_csv_success(client: AsyncClient):
     status_data = status_response.json()
     assert status_data["id"] == job_id
     assert status_data["status"] == "completed"
-    assert status_data["summary"]["total_rows"] == 2
-    assert status_data["summary"]["total_amount"] == 15120.50
-    assert status_data["summary"]["anomalies_count"] == 1
-    assert status_data["summary"]["top_category"] == "Electronics"
+
+    summary = status_data["summary"]
+    assert summary is not None
+    assert summary["anomaly_count"] == 1
+    assert (
+        summary["total_spend_usd"] > 6000.0
+    )  # TX1002 is $6,000, TX1001 is INR 120.50 ($1.45)
+    assert "New Laptop" in summary["top_merchants"]
+    assert summary["risk_level"] == "Medium"  # 1 anomaly
 
     # 3. Get Job Results
     results_response = await client.get(f"/api/v1/jobs/{job_id}/results")
@@ -55,20 +60,24 @@ async def test_upload_csv_success(client: AsyncClient):
     assert results_data["id"] == job_id
     assert results_data["status"] == "completed"
 
-    results = results_data["results"]
-    assert len(results["cleaned_transactions"]) == 2
-    assert len(results["flagged_anomalies"]) == 1
-    assert results["flagged_anomalies"][0]["transaction_id"] == "TX1002"
-    assert results["spend_breakdown"]["Groceries"]["total_spend"] == 120.50
-    assert "Successfully parsed and processed" in results["narrative_summary"]
+    transactions_list = results_data["transactions"]
+    assert len(transactions_list) == 2
+
+    # Assert TX1002 is flagged as an anomaly
+    laptop_txn = next(t for t in transactions_list if t["txn_id"] == "TX1002")
+    assert laptop_txn["is_anomaly"] is True
+    assert "High value transaction" in laptop_txn["anomaly_reason"]
+    assert laptop_txn["llm_category"] == "Electronics"
+    assert laptop_txn["llm_failed"] is False
+
+    grocery_txn = next(t for t in transactions_list if t["txn_id"] == "TX1001")
+    assert grocery_txn["is_anomaly"] is False
+    assert grocery_txn["currency"] == "INR"
 
 
 async def test_upload_invalid_csv(client: AsyncClient):
-    # Invalid CSV structure (missing required column)
-    csv_content = (
-        "transaction_id,amount,category,description\n"
-        "TX1001,120.50,Groceries,Weekly grocery shop\n"
-    )
+    # Invalid CSV structure (missing required column: merchant)
+    csv_content = "txn_id,date,amount\nTX1001,2026-06-25,120.50\n"
     files = {
         "file": (
             "transactions.csv",

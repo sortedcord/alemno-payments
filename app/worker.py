@@ -1,10 +1,17 @@
 import asyncio
+from datetime import datetime, date
 from typing import Any, Dict, List
 from celery import Celery
 from app.core.config import settings
 from app.core.logging import logger
 from app.db.session import AsyncSessionLocal
 from app.repositories.job_repository import JobRepository
+from app.db.models.transaction import Transaction
+from app.db.models.job_summary import JobSummary
+from app.clients.exchange_rate_client import ExchangeRateClient
+
+exchange_rate_client = ExchangeRateClient()
+
 
 # Define Celery app
 celery_app = Celery(
@@ -32,7 +39,7 @@ def run_async(coro):
 def process_transaction_job(job_id: str, transactions: List[Dict[str, Any]]):
     """
     Background job to clean transactions, detect anomalies, calculate spend breakdown,
-    generate narrative summary, and persist results.
+    generate narrative summary, and persist results to Transaction and JobSummary tables.
     """
     logger.info(f"Starting Celery task to process job_id: {job_id}")
     return run_async(_process_job_async(job_id, transactions))
@@ -51,103 +58,142 @@ async def _process_job_async(job_id: str, transactions: List[Dict[str, Any]]):
             await repo.update(job, status="processing")
             await db.commit()
 
-            # 1. Clean transactions
-            cleaned_transactions = []
-            total_amount = 0.0
-            categories = {}
+            db_transactions = []
+            total_spend_inr = 0.0
+            total_spend_usd = 0.0
+            merchant_spends: Dict[str, float] = {}
+            anomaly_count = 0
+
+            USD_TO_INR = await exchange_rate_client.get_usd_to_inr_rate()
+
             for t in transactions:
-                # Clean description and category
-                desc = t["description"].strip()
-                cat = t["category"].strip().capitalize()
-                amount = float(t["amount"])
-
-                total_amount += amount
-                categories[cat] = categories.get(cat, 0.0) + amount
-
-                cleaned_transactions.append(
-                    {
-                        "transaction_id": t["transaction_id"],
-                        "date": t["date"],
-                        "amount": amount,
-                        "category": cat,
-                        "description": desc,
-                    }
+                txn_id = t["txn_id"]
+                raw_date = t["date"]
+                # Parse date string to datetime.date object
+                parsed_date = (
+                    date.fromisoformat(raw_date)
+                    if isinstance(raw_date, str)
+                    else raw_date
                 )
+                merchant = t["merchant"].strip()
+                amount = float(t["amount"])
+                currency = t.get("currency", "INR").strip().upper()
+                category = t.get("category", "General")
+                account_id = t.get("account_id")
 
-            # 2. Flag anomalies (Heuristic: > $5,000, or containing suspicious keywords)
-            anomalies = []
-            for t in cleaned_transactions:
+                # Spend calculation and currency conversion
+                if currency == "USD":
+                    amt_usd = amount
+                    amt_inr = amount * USD_TO_INR
+                else:
+                    amt_inr = amount
+                    amt_usd = amount / USD_TO_INR
+
+                total_spend_inr += amt_inr
+                total_spend_usd += amt_usd
+
+                # Aggregate merchant spend (in USD for standardization)
+                merchant_spends[merchant] = merchant_spends.get(merchant, 0.0) + amt_usd
+
+                # Heuristic Anomaly detection
                 is_anomaly = False
-                reasons = []
-
-                if t["amount"] > 5000.0:
+                anomaly_reason = None
+                if amt_usd > 5000.0:
                     is_anomaly = True
-                    reasons.append("High value transaction (> $5,000)")
-
-                desc_lower = t["description"].lower()
-                if any(
-                    k in desc_lower
-                    for k in ["suspend", "hack", "error", "unknown", "fraud"]
-                ):
-                    is_anomaly = True
-                    reasons.append("Suspicious keyword found in description")
+                    anomaly_reason = "High value transaction (> $5,000 USD equivalent)"
+                else:
+                    desc_lower = merchant.lower()
+                    if any(
+                        k in desc_lower
+                        for k in ["suspend", "hack", "error", "unknown", "fraud"]
+                    ):
+                        is_anomaly = True
+                        anomaly_reason = "Suspicious merchant keyword"
 
                 if is_anomaly:
-                    anomalies.append({**t, "reasons": reasons})
+                    anomaly_count += 1
 
-            # 3. Spend breakdown (percentage & absolute)
-            spend_breakdown = {}
-            for cat, amount in categories.items():
-                pct = (amount / total_amount * 100) if total_amount > 0 else 0
-                spend_breakdown[cat] = {
-                    "total_spend": round(amount, 2),
-                    "percentage": round(pct, 2),
-                }
+                # Mock
+                llm_failed = False
+                llm_category = category.capitalize() if category else "General"
+                llm_raw_response = f'{{"category": "{llm_category}", "confidence": 0.95, "status": "processed"}}'
 
-            # 4. Generate LLM Narrative Summary (Mocked / simulated intelligence)
-            top_category = max(categories, key=categories.get) if categories else "None"
-            anomaly_pct = (
-                (len(anomalies) / len(transactions) * 100) if transactions else 0
+                db_txn = Transaction(
+                    job_id=job_id,
+                    txn_id=txn_id,
+                    date=parsed_date,
+                    merchant=merchant,
+                    amount=amount,
+                    currency=currency,
+                    status="cleaned",
+                    category=category,
+                    account_id=account_id,
+                    is_anomaly=is_anomaly,
+                    anomaly_reason=anomaly_reason,
+                    llm_category=llm_category,
+                    llm_raw_response=llm_raw_response,
+                    llm_failed=llm_failed,
+                )
+                db_transactions.append(db_txn)
+
+            await repo.add_transactions(db_transactions)
+
+            top_merchant = (
+                max(merchant_spends, key=merchant_spends.get)
+                if merchant_spends
+                else "None"
             )
+            risk_level = "Low"
+            if anomaly_count > 2:
+                risk_level = "High"
+            elif anomaly_count > 0:
+                risk_level = "Medium"
+
             narrative = (
-                f"Successfully parsed and processed {len(transactions)} transaction records. "
-                f"Total spend across all transactions is ${total_amount:,.2f}. "
-                f"We identified '{top_category}' as the largest spending category, amounting to "
-                f"${categories.get(top_category, 0):,.2f} ({spend_breakdown.get(top_category, {}).get('percentage', 0)}% of total). "
-                f"A scan for transactional anomalies flagged {len(anomalies)} records ({anomaly_pct:.1f}% of total). "
-                f"Most anomalies were triggered by high transaction limits or unrecognized transaction descriptions. "
-                f"Recommendation: Review flagged anomalies to prevent potential leakages."
+                f"Successfully parsed and clean-processed {len(transactions)} transaction records. "
+                f"Total spend is INR {total_spend_inr:,.2f} (${total_spend_usd:,.2f} USD). "
+                f"Top merchant by spend volume is '{top_merchant}' with total of ${merchant_spends.get(top_merchant, 0):,.2f} USD. "
+                f"Scan flagged {anomaly_count} potential anomalies, resulting in a overall risk level of '{risk_level}'."
             )
 
-            # Build full structured output
-            results = {
-                "cleaned_transactions": cleaned_transactions,
-                "flagged_anomalies": anomalies,
-                "spend_breakdown": spend_breakdown,
-                "narrative_summary": narrative,
+            # Build top merchants dict sorted by spend limit (keep top 5)
+            sorted_merchants = sorted(
+                merchant_spends.items(), key=lambda x: x[1], reverse=True
+            )[:5]
+            top_merchants_json = {
+                merchant: round(spend, 2) for merchant, spend in sorted_merchants
             }
 
-            # Build high-level stats for status summary
-            summary = {
-                "total_rows": len(transactions),
-                "total_amount": round(total_amount, 2),
-                "anomalies_count": len(anomalies),
-                "top_category": top_category,
-            }
+            # Create job summary
+            summary = JobSummary(
+                job_id=job_id,
+                total_spend_inr=round(total_spend_inr, 2),
+                total_spend_usd=round(total_spend_usd, 2),
+                top_merchants=top_merchants_json,
+                anomaly_count=anomaly_count,
+                narrative=narrative,
+                risk_level=risk_level,
+            )
+            await repo.add_summary(summary)
 
-            # Update job in DB
+            # Update job state
             await repo.update(
                 job,
                 status="completed",
-                row_count=len(transactions),
-                summary=summary,
-                results=results,
+                row_count_raw=len(transactions),
+                row_count_clean=len(db_transactions),
+                completed_at=datetime.utcnow(),
             )
             await db.commit()
             logger.info(f"Job {job_id} processing completed successfully.")
 
         except Exception as e:
             logger.exception(f"Error processing job {job_id}")
-            await repo.update(job, status="failed")
+            await repo.update(
+                job,
+                status="failed",
+                error_message=str(e),
+                completed_at=datetime.utcnow(),
+            )
             await db.commit()
             raise e
